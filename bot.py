@@ -467,20 +467,11 @@ def run():
 
     sl_pips = abs(entry - sl) * 10
     rr = abs(tp1 - entry) / abs(entry - sl)
+if action == "LONG":
+    direction = "BUY GOLD"
+else:
+    direction = "SELL GOLD"
 
-now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-text = "GOLD SMC " + action + " - " + session
-text = text + "\n\nTime: " + now
+text = direction
 text = text + "\nEntry: " + str(round(entry, 2))
-text = text + "\nSL: " + str(round(sl, 2)) + " (" + str(round(sl_pips)) + " pips)"
-text = text + "\nTP1: " + str(round(tp1, 2))
-text = text + "\nTP2: " + str(round(tp2, 2))
-text = text + "\nTP3: " + str(round(tp3, 2))
-text = text + "\nConf: " + str(conf) + "/35"
-
-if pre:
-    text = text + "\n\nPRE-NEWS: " + pre
-    text = text + "\nCLOSE TRADES NOW"
-
-if news_days:
-    text = text + "\n\nNEWS DAY: " + ", ".join(news_days)
+text = text + "\nSL: " + str(round(sl, 2))
