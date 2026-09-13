@@ -467,7 +467,7 @@ def run():
 
     sl_pips = abs(entry - sl) * 10
     rr = abs(tp1 - entry) / abs(entry - sl)
-470    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+470.   now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 471    text = "GOLD SMC " + action + " - " + session
 472    text = text + "\n\nTime: " + now
 473    text = text + "\nEntry: " + str(round(entry, 2))
