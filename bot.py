@@ -276,9 +276,9 @@ def run():
     nb = [f for f in fvgs if f["t"] == "B" and abs(cur - f["ce"]) < adr * 0.3]
     ns = [f for f in fvgs if f["t"] == "S" and abs(cur - f["ce"]) < adr * 0.3]
     if nb:
-        bull.append("Bull FVG @ " + str(round(nb[0]["ce"], 2)))
+        bull.append("Bull FVG")
     if ns:
-        bear.append("Bear FVG @ " + str(round(ns[0]["ce"], 2)))
+        bear.append("Bear FVG")
 
     b_ob, s_ob = find_ob(h1)
     if b_ob and b_ob["bot"] - 5 <= cur <= b_ob["top"] + 5:
@@ -292,9 +292,9 @@ def run():
     nB = next((p for p in bsl if p > cur), None)
     nS = next((p for p in ssl if p < cur), None)
     if nB and nB - cur < adr * 0.3:
-        bear.append("Near BSL " + str(round(nB, 2)))
+        bear.append("Near BSL")
     if nS and cur - nS < adr * 0.3:
-        bull.append("Near SSL " + str(round(nS, 2)))
+        bull.append("Near SSL")
 
     if check_equal_levels(L1):
         bull.append("Equal Lows")
@@ -320,13 +320,13 @@ def run():
 
     r = rsi(closes)
     if r < 30:
-        bull.append("RSI Oversold " + str(round(r, 1)))
+        bull.append("RSI Oversold")
     if r > 70:
-        bear.append("RSI Overbought " + str(round(r, 1)))
+        bear.append("RSI Overbought")
     if 50 < r < 70:
-        bull.append("RSI Bullish " + str(round(r, 1)))
+        bull.append("RSI Bullish")
     if 30 < r < 50:
-        bear.append("RSI Bearish " + str(round(r, 1)))
+        bear.append("RSI Bearish")
 
     m_now = ema(closes[-50:], 12) - ema(closes[-50:], 26)
     m_prev = ema(closes[-51:-1], 12) - ema(closes[-51:-1], 26)
@@ -370,9 +370,9 @@ def run():
     pdh = daily["high"].iloc[-2]
     pdl = daily["low"].iloc[-2]
     if abs(cur - pdh) < adr * 0.25:
-        bear.append("Near PDH " + str(round(pdh, 2)))
+        bear.append("Near PDH")
     if abs(cur - pdl) < adr * 0.25:
-        bull.append("Near PDL " + str(round(pdl, 2)))
+        bull.append("Near PDL")
 
     week_high = daily["high"].tail(7).max()
     week_low = daily["low"].tail(7).min()
@@ -384,9 +384,9 @@ def run():
     rn = round(cur / 50) * 50
     if abs(cur - rn) < adr * 0.15:
         if cur > rn:
-            bear.append("Above Round " + str(rn))
+            bear.append("Above Round")
         else:
-            bull.append("Below Round " + str(rn))
+            bull.append("Below Round")
 
     dow = datetime.now(timezone.utc).weekday()
     if dow == 0 and len(daily) > 1:
@@ -467,21 +467,27 @@ def run():
 
     sl_pips = abs(entry - sl) * 10
     rr = abs(tp1 - entry) / abs(entry - sl)
-470.   now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-471    text = "GOLD SMC " + action + " - " + session
-472    text = text + "\n\nTime: " + now
-473    text = text + "\nEntry: " + str(round(entry, 2))
-474    text = text + "\nSL: " + str(round(sl, 2))
-475    text = text + "\nTP1: " + str(round(tp1, 2))
-476    text = text + "\nTP2: " + str(round(tp2, 2))
-477    text = text + "\nTP3: " + str(round(tp3, 2))
-478    text = text + "\nConf: " + str(conf) + "/35"
-479    
-480    if pre:
-481        text = text + "\n\nPRE-NEWS: " + pre
-482        text = text + "\nCLOSE TRADES NOW"
-483
-484    if news_days:
-485        text = text + "\n\nNEWS DAY: " + ", ".join(news_days)
-486
-487    requests.post(...)
+
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    text = "GOLD SMC " + action + " - " + session
+    text = text + "\n\nTime: " + now
+    text = text + "\nEntry: " + str(round(entry, 2))
+    text = text + "\nSL: " + str(round(sl, 2))
+    text = text + "\nTP1: " + str(round(tp1, 2))
+    text = text + "\nTP2: " + str(round(tp2, 2))
+    text = text + "\nTP3: " + str(round(tp3, 2))
+    text = text + "\nConf: " + str(conf) + "/35"
+
+    if pre:
+        text = text + "\n\nPRE-NEWS: " + pre
+        text = text + "\nCLOSE TRADES NOW"
+
+    if news_days:
+        text = text + "\n\nNEWS DAY: " + ", ".join(news_days)
+
+    requests.post("https://api.telegram.org/bot" + TG + "/sendMessage",
+                  data={"chat_id": CI, "text": text}, timeout=30)
+    print("Sent: " + action + " Conf " + str(conf))
+
+if __name__ == "__main__":
+    run()
