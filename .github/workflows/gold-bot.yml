@@ -1,4 +1,4 @@
-          name: Gold SMC Bot
+name: Gold SMC Bot
 
 on:
   schedule:
