@@ -1,9 +1,9 @@
 {
   "position": null,
   "counter": null,
-  "last_session": "",
-  "session_open": null,
-  "session_open_time": "",
+  "last_session": "NEWYORK",
+  "session_open": 4311.83167,
+  "session_open_time": "2026-09-14 18:00 UTC",
   "exhaust_alerted": "",
   "ny_close_alerted": "",
   "weekend_alerted": "",
