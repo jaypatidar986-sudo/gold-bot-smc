@@ -26,14 +26,15 @@ def load_state():
                 "today_trades": 0, "today_date": "",
                 "last_signal_price": 0, "last_signal_time": "",
                 "last_signal_dir": "", "confluence_history": [],
-                "flip_count": 0, "cache": {},
+                "flip_count": 0,
                 "peak_equity": 1000, "current_equity": 1000}
 
 
 def save_state(state):
+    clean = {k: v for k, v in state.items() if k != "cache"}
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+            json.dump(clean, f, indent=2, default=str)
     except Exception as e:
         print("State write failed: " + str(e))
     if not GH_TOKEN or not GH_REPO:
@@ -43,7 +44,7 @@ def save_state(state):
     try:
         r = requests.get(api, headers=headers)
         sha = r.json().get("sha") if r.status_code == 200 else None
-        content = base64.b64encode(json.dumps(state, indent=2, default=str).encode()).decode()
+        content = base64.b64encode(json.dumps(clean, indent=2, default=str).encode()).decode()
         data = {"message": "state update", "content": content}
         if sha:
             data["sha"] = sha
@@ -1300,33 +1301,11 @@ def run():
         save_state(state)
 
     data = {}
-    cache = state.get("cache", {})
-    now_ts = int(time.time())
-    tfs = [("m5", "5min", 200, 300), ("m15", "15min", 200, 300),
-           ("h1", "1h", 250, 1800), ("h4", "4h", 200, 3600), ("daily", "1day", 200, 7200)]
-    for n, i, s, ttl in tfs:
-        c = cache.get(n, {})
-        if c.get("ts", 0) + ttl > now_ts and c.get("data"):
-            try:
-                d = pd.DataFrame(c["data"])
-                if "dt" not in d.columns and "datetime" in d.columns:
-                    d["dt"] = pd.to_datetime(d["datetime"])
-                for col in ["open", "high", "low", "close"]:
-                    d[col] = d[col].astype(float)
-                data[n] = d.sort_values("dt").reset_index(drop=True)
-            except Exception:
-                data[n] = fetch(i, s)
-        else:
-            fetched = fetch(i, s)
-            data[n] = fetched
-            if fetched is not None:
-                try:
-                    cache[n] = {"ts": now_ts, "data": fetched.drop(columns=["dt"], errors="ignore").to_dict("records")}
-                except Exception as e:
-                    print("Cache fail " + n + ": " + str(e))
-            time.sleep(6)
-    state["cache"] = cache
-    save_state(state)
+    tfs = [("m5", "5min", 200), ("m15", "15min", 200),
+           ("h1", "1h", 250), ("h4", "4h", 200), ("daily", "1day", 200)]
+    for n, i, s in tfs:
+        data[n] = fetch(i, s)
+        time.sleep(6)
 
     if any(v is None for v in data.values()):
         print("Fetch failed")
