@@ -17,6 +17,7 @@ def load_state():
     except Exception:
         return {"position": None, "counter": None, "last_session": "",
                 "session_open": None, "session_open_time": "",
+                "session_high": None, "session_low": None,
                 "exhaust_alerted": "", "ny_close_alerted": "",
                 "weekend_alerted": "", "last_normal_run": "",
                 "last_hold_msg": "", "neutral_alerted": "",
@@ -34,7 +35,7 @@ def save_state(state):
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2, default=str)
     except Exception as e:
-        print("State file write failed: " + str(e))
+        print("State write failed: " + str(e))
     if not GH_TOKEN or not GH_REPO:
         return
     api = "https://api.github.com/repos/" + GH_REPO + "/contents/" + STATE_FILE
@@ -59,7 +60,7 @@ def send_telegram(msg):
             timeout=30,
         )
     except Exception as e:
-        print("Telegram send failed: " + str(e))
+        print("Telegram failed: " + str(e))
 
 
 def to_ist(dt_utc):
@@ -1129,6 +1130,120 @@ def check_cooldown_safe(state, now_utc):
     return False
 
 
+def check_1m_hold_cancel(m1, state, cur):
+    pos = state.get("position")
+    if not pos:
+        return None
+    pos_side = pos["side"]
+    entry = pos["entry"]
+    if len(m1) < 3:
+        return None
+    ranges = (m1["high"] - m1["low"]).tail(20)
+    avg_range = ranges.mean()
+    if avg_range == 0:
+        return None
+    c = m1.iloc[-1]
+    c_range = c["high"] - c["low"]
+    ratio = c_range / avg_range
+    candle_bull = c["close"] > c["open"]
+    against = (pos_side == "LONG" and not candle_bull) or (pos_side == "SHORT" and candle_bull)
+    if not against:
+        return None
+    if ratio < 2.5:
+        return None
+    body = abs(c["close"] - c["open"])
+    body_pct = (body / c_range * 100) if c_range > 0 else 0
+    if body_pct < 60:
+        return None
+    if pos_side == "LONG":
+        loss = entry - cur
+    else:
+        loss = cur - entry
+    return {"ratio": round(ratio, 2), "range": round(c_range, 2), "body_pct": round(body_pct, 1),
+            "loss": round(loss, 1), "direction": "BEAR" if pos_side == "LONG" else "BULL"}
+
+
+def check_5m_10pip_move(m5, state, cur, h1, m15, dxy_c, us10y_c):
+    pos = state.get("position")
+    if not pos:
+        return None
+    pos_side = pos["side"]
+    entry = pos["entry"]
+    if len(m5) < 5:
+        return None
+    last3 = m5.tail(3)
+    move = abs(last3["close"].iloc[-1] - last3["open"].iloc[0])
+    if move < 10:
+        return None
+    if pos_side == "LONG":
+        against = last3["close"].iloc[-1] < last3["open"].iloc[0]
+    else:
+        against = last3["close"].iloc[-1] > last3["open"].iloc[0]
+    if not against:
+        return None
+    score = 0
+    reasons = []
+    c15 = check_choch(m15)
+    if pos_side == "LONG" and c15 == "BEAR":
+        score += 2; reasons.append("M15 CHoCH Bear")
+    if pos_side == "SHORT" and c15 == "BULL":
+        score += 2; reasons.append("M15 CHoCH Bull")
+    if detect_liquidity_sweep(m5, pos_side):
+        score += 2; reasons.append("Liq Sweep")
+    if volume_spike(m5):
+        score += 1; reasons.append("Vol 1.3x+")
+    if pos_side == "LONG" and dxy_c > 0.1:
+        score += 1; reasons.append("DXY Strong")
+    if pos_side == "SHORT" and dxy_c < -0.1:
+        score += 1; reasons.append("DXY Weak")
+    if pos_side == "LONG":
+        if h1["close"].iloc[-1] < h1["close"].iloc[-2]:
+            score += 1; reasons.append("H1 Against")
+    else:
+        if h1["close"].iloc[-1] > h1["close"].iloc[-2]:
+            score += 1; reasons.append("H1 Against")
+    last_c = m5.iloc[-1]
+    last_range = last_c["high"] - last_c["low"]
+    avg_rng = (m5["high"] - m5["low"]).tail(20).mean()
+    if avg_rng > 0 and last_range > avg_rng * 1.5 and volume_spike(m5):
+        score += 1; reasons.append("Big 5M+Vol")
+    last2 = m5.tail(2)
+    if pos_side == "LONG":
+        if last2["close"].iloc[-1] < last2["open"].iloc[-1] and last2["close"].iloc[-2] < last2["open"].iloc[-2]:
+            score += 2; reasons.append("2 Bear Candles")
+    else:
+        if last2["close"].iloc[-1] > last2["open"].iloc[-1] and last2["close"].iloc[-2] > last2["open"].iloc[-2]:
+            score += 2; reasons.append("2 Bull Candles")
+    body = abs(last_c["close"] - last_c["open"])
+    body_pct = (body / last_range * 100) if last_range > 0 else 0
+    if body_pct > 70:
+        score += 1; reasons.append("Body 70%+")
+    op = pos.get("opened_at", "")
+    if op:
+        try:
+            od = datetime.strptime(op, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - od).total_seconds() / 60
+            if age > 30:
+                score += 1; reasons.append("30min+ Old")
+        except Exception:
+            pass
+    if pos_side == "LONG":
+        pnl = cur - entry
+    else:
+        pnl = entry - cur
+    if pnl < -10:
+        score += 1; reasons.append("Loss 10+")
+    if score >= 9:
+        dec = "CLOSE_REVERSE"
+    elif score >= 6:
+        dec = "CLOSE"
+    elif score >= 4:
+        dec = "WATCH"
+    else:
+        dec = "HOLD"
+    return {"score": score, "decision": dec, "reasons": reasons, "move": round(move, 1)}
+
+
 def run():
     state = load_state()
     session = get_session()
@@ -1208,7 +1323,7 @@ def run():
                 try:
                     cache[n] = {"ts": now_ts, "data": fetched.drop(columns=["dt"], errors="ignore").to_dict("records")}
                 except Exception as e:
-                    print("Cache save failed for " + n + ": " + str(e))
+                    print("Cache fail " + n + ": " + str(e))
             time.sleep(6)
     state["cache"] = cache
     save_state(state)
@@ -1231,6 +1346,37 @@ def run():
     if msg: send_telegram(msg)
     state, msg = check_counter(state, cur)
     if msg: send_telegram(msg)
+
+    if state.get("position"):
+        m1 = fetch("1min", 50)
+        if m1 is not None:
+            big_1m = check_1m_hold_cancel(m1, state, cur)
+            if big_1m:
+                pos = state["position"]
+                stx = "BUY" if pos["side"] == "LONG" else "SELL"
+                m = "🚨 1M BIG CANDLE - HOLD CANCEL\n\n"
+                m += "Range: " + str(big_1m["range"]) + " (" + str(big_1m["ratio"]) + "x)\n"
+                m += "Body: " + str(big_1m["body_pct"]) + "%\n"
+                m += "Dir: " + big_1m["direction"] + " against " + stx + "\n"
+                m += "Loss: " + str(big_1m["loss"]) + " pips\n\n"
+                m += "CLOSE " + stx + " NOW"
+                send_telegram(m)
+
+    if state.get("position"):
+        m5mv = check_5m_10pip_move(m5, state, cur, h1, m15, dxy_c, us10y_c)
+        if m5mv and m5mv["decision"] != "HOLD":
+            emo = {"WATCH": "⚠️", "CLOSE": "🚨", "CLOSE_REVERSE": "🚨🚨"}[m5mv["decision"]]
+            pos = state["position"]
+            stx = "BUY" if pos["side"] == "LONG" else "SELL"
+            m = emo + " 5M " + str(m5mv["move"]) + " PIPS AGAINST " + stx + "\n\n"
+            m += "Score: " + str(m5mv["score"]) + "/15\n"
+            m += "Decision: " + m5mv["decision"].replace("_", " ") + "\n\n"
+            for r in m5mv["reasons"]:
+                m += "• " + r + "\n"
+            if m5mv["decision"] == "CLOSE_REVERSE":
+                rvs = "BUY" if pos["side"] == "SHORT" else "SELL"
+                m += "\n1. CLOSE " + stx + "\n2. Take " + rvs + " @ " + str(round(cur, 2))
+            send_telegram(m)
 
     broken, reason, action = check_long_hold_break(state, h1, m15, m5, cur, dxy_c, us10y_c)
     if broken:
@@ -1268,12 +1414,28 @@ def run():
     if sc or not state.get("session_open"):
         state["session_open"] = cur
         state["session_open_time"] = now_str
+        state["session_high"] = cur
+        state["session_low"] = cur
     if sc:
         state["flip_count"] = 0
+    sh_prev = state.get("session_high")
+    sl_prev = state.get("session_low")
+    new_high = False
+    new_low = False
+    if sh_prev is None or cur > sh_prev:
+        state["session_high"] = cur
+        new_high = True
+    if sl_prev is None or cur < sl_prev:
+        state["session_low"] = cur
+        new_low = True
     state["last_session"] = session
     save_state(state)
     if sc:
         send_telegram("🔔 SESSION CHANGE: " + old_s + " -> " + session)
+    if new_high and not sc:
+        send_telegram("📈 " + session + " NEW HIGH: " + str(round(cur, 2)))
+    if new_low and not sc:
+        send_telegram("📉 " + session + " NEW LOW: " + str(round(cur, 2)))
 
     bull, bear = [], []
     d_hi, d_lo = daily["high"].max(), daily["low"].min()
@@ -1560,6 +1722,13 @@ def run():
         print("HTF not aligned")
         return
 
+    last_price = state.get("last_signal_price", 0)
+    if last_price:
+        drift = abs(cur - last_price)
+        if drift > 15:
+            print("Late signal drift " + str(round(drift, 1)) + " - skip")
+            return
+
     if existing:
         if existing["side"] == action:
             lh = state.get("last_hold_msg", "")
@@ -1626,10 +1795,6 @@ def run():
     text += "\nTime: " + format_ist_time(now_utc)
     text += "\nSession: " + session
     text += "\nMode: " + mode + " (B:" + str(bp) + "% S:" + str(sp) + "%)"
-    if vp:
-        text += "\nPOC: " + str(vp["POC"]) + " VAH: " + str(vp["VAH"]) + " VAL: " + str(vp["VAL"])
-    if kz:
-        text += "\n⚡ " + kz
     if liq["nearest_bsl"]:
         text += "\n\nLiquidity Above: " + str(round(liq["nearest_bsl"], 2))
     if liq["nearest_ssl"]:
