@@ -30,8 +30,11 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except Exception as e:
+        print("State file write failed: " + str(e))
     if not GH_TOKEN or not GH_REPO:
         return
     api = "https://api.github.com/repos/" + GH_REPO + "/contents/" + STATE_FILE
@@ -39,7 +42,7 @@ def save_state(state):
     try:
         r = requests.get(api, headers=headers)
         sha = r.json().get("sha") if r.status_code == 200 else None
-        content = base64.b64encode(json.dumps(state, indent=2).encode()).decode()
+        content = base64.b64encode(json.dumps(state, indent=2, default=str).encode()).decode()
         data = {"message": "state update", "content": content}
         if sha:
             data["sha"] = sha
@@ -1189,16 +1192,23 @@ def run():
     for n, i, s, ttl in tfs:
         c = cache.get(n, {})
         if c.get("ts", 0) + ttl > now_ts and c.get("data"):
-            d = pd.DataFrame(c["data"])
-            d["dt"] = pd.to_datetime(d["datetime"])
-            for col in ["open", "high", "low", "close"]:
-                d[col] = d[col].astype(float)
-            data[n] = d.sort_values("dt").reset_index(drop=True)
+            try:
+                d = pd.DataFrame(c["data"])
+                if "dt" not in d.columns and "datetime" in d.columns:
+                    d["dt"] = pd.to_datetime(d["datetime"])
+                for col in ["open", "high", "low", "close"]:
+                    d[col] = d[col].astype(float)
+                data[n] = d.sort_values("dt").reset_index(drop=True)
+            except Exception:
+                data[n] = fetch(i, s)
         else:
             fetched = fetch(i, s)
             data[n] = fetched
             if fetched is not None:
-                cache[n] = {"ts": now_ts, "data": fetched.to_dict("records")}
+                try:
+                    cache[n] = {"ts": now_ts, "data": fetched.drop(columns=["dt"], errors="ignore").to_dict("records")}
+                except Exception as e:
+                    print("Cache save failed for " + n + ": " + str(e))
             time.sleep(6)
     state["cache"] = cache
     save_state(state)
