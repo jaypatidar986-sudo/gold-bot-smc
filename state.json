@@ -14,11 +14,11 @@
     "flip_from": "LONG"
   },
   "counter": null,
-  "last_session": "NEWYORK",
-  "session_open": 4287.61309,
-  "session_open_time": "2026-09-15 16:13 UTC",
-  "session_high": 4309.78753,
-  "session_low": 4287.61309,
+  "last_session": "SYDNEY",
+  "session_open": 4294.05703,
+  "session_open_time": "2026-09-15 21:16 UTC",
+  "session_high": 4294.05703,
+  "session_low": 4294.05703,
   "exhaust_alerted": "SYDNEY_BEAR_EXHAUST",
   "ny_close_alerted": "",
   "weekend_alerted": "",
@@ -36,7 +36,7 @@
   "last_signal_time": "2026-09-15 11:33 UTC",
   "last_signal_dir": "SHORT",
   "confluence_history": [],
-  "flip_count": 4,
+  "flip_count": 0,
   "peak_equity": 1000,
   "current_equity": 1000
 }
