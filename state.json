@@ -1,11 +1,11 @@
 {
   "position": null,
   "counter": null,
-  "last_session": "SYDNEY",
+  "last_session": "LONDON",
   "session_open": 4298.8565,
   "session_open_time": "2026-09-14 21:17 UTC",
   "session_high": 4313.13349,
-  "session_low": 4268.21461,
+  "session_low": 4262.7563,
   "exhaust_alerted": "SYDNEY_BEAR_EXHAUST",
   "ny_close_alerted": "",
   "weekend_alerted": "",
