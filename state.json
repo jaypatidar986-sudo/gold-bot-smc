@@ -7,7 +7,9 @@
     "tp2": 4273.11115,
     "tp3": 4263.11115,
     "tp_hits": [],
-    "warn_hits": [],
+    "warn_hits": [
+      1
+    ],
     "opened_at": "2026-09-15 18:36 UTC",
     "flip_from": "LONG"
   },
@@ -15,7 +17,7 @@
   "last_session": "NEWYORK",
   "session_open": 4287.61309,
   "session_open_time": "2026-09-15 16:13 UTC",
-  "session_high": 4295.53265,
+  "session_high": 4309.78753,
   "session_low": 4287.61309,
   "exhaust_alerted": "SYDNEY_BEAR_EXHAUST",
   "ny_close_alerted": "",
