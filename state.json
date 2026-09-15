@@ -7,15 +7,17 @@
     "tp2": 4259.79,
     "tp3": 4252.29,
     "tp_hits": [],
-    "warn_hits": [],
+    "warn_hits": [
+      1
+    ],
     "opened_at": "2026-09-15 11:33 UTC"
   },
   "counter": null,
-  "last_session": "LONDON",
-  "session_open": 4298.8565,
-  "session_open_time": "2026-09-14 21:17 UTC",
-  "session_high": 4313.13349,
-  "session_low": 4262.7563,
+  "last_session": "NY_OVERLAP",
+  "session_open": 4287.24544,
+  "session_open_time": "2026-09-15 12:49 UTC",
+  "session_high": 4287.24544,
+  "session_low": 4287.24544,
   "exhaust_alerted": "SYDNEY_BEAR_EXHAUST",
   "ny_close_alerted": "",
   "weekend_alerted": "",
@@ -33,7 +35,7 @@
   "last_signal_time": "2026-09-15 11:33 UTC",
   "last_signal_dir": "SHORT",
   "confluence_history": [],
-  "flip_count": 4,
+  "flip_count": 0,
   "peak_equity": 1000,
   "current_equity": 1000
 }
