@@ -1,15 +1,15 @@
 {
   "position": {
-    "side": "LONG",
-    "entry": 4292.76669,
-    "sl": 4272.76669,
-    "tp1": 4312.76669,
-    "tp2": 4322.76669,
-    "tp3": 4332.76669,
+    "side": "SHORT",
+    "entry": 4312.94747,
+    "sl": 4332.94747,
+    "tp1": 4292.94747,
+    "tp2": 4282.94747,
+    "tp3": 4272.94747,
     "tp_hits": [],
     "warn_hits": [],
-    "opened_at": "2026-09-15 00:47 UTC",
-    "flip_from": "SHORT"
+    "opened_at": "2026-09-15 02:44 UTC",
+    "flip_from": "LONG"
   },
   "counter": null,
   "last_session": "SYDNEY",
@@ -34,7 +34,7 @@
   "last_signal_time": "2026-09-15 00:25 UTC",
   "last_signal_dir": "SHORT",
   "confluence_history": [],
-  "flip_count": 3,
+  "flip_count": 4,
   "peak_equity": 1000,
   "current_equity": 1000
 }
