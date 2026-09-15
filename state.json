@@ -2,11 +2,13 @@
   "position": {
     "side": "SHORT",
     "entry": 4312.94747,
-    "sl": 4332.94747,
+    "sl": 4312.94747,
     "tp1": 4292.94747,
     "tp2": 4282.94747,
     "tp3": 4272.94747,
-    "tp_hits": [],
+    "tp_hits": [
+      1
+    ],
     "warn_hits": [],
     "opened_at": "2026-09-15 02:44 UTC",
     "flip_from": "LONG"
