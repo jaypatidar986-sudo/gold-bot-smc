@@ -1,23 +1,11 @@
 {
-  "position": {
-    "side": "LONG",
-    "entry": 4297.56328,
-    "sl": 4297.56328,
-    "tp1": 4322.83,
-    "tp2": 4335.46,
-    "tp3": 4348.09,
-    "tp_hits": [
-      1
-    ],
-    "warn_hits": [],
-    "opened_at": "2026-09-17 05:50 UTC"
-  },
+  "position": null,
   "counter": null,
-  "last_session": "LONDON",
-  "session_open": 4263.3015,
-  "session_open_time": "2026-09-16 21:14 UTC",
-  "session_high": 4331.62956,
-  "session_low": 4261.12153,
+  "last_session": "NY_OVERLAP",
+  "session_open": 4348.77147,
+  "session_open_time": "2026-09-17 12:03 UTC",
+  "session_high": 4348.77147,
+  "session_low": 4348.77147,
   "exhaust_alerted": "SYDNEY_BEAR_EXHAUST",
   "ny_close_alerted": "",
   "weekend_alerted": "",
@@ -27,7 +15,7 @@
   "last_mode": "",
   "last_sl_time": "2026-09-16 02:42 UTC",
   "daily_loss": 0,
-  "wins": 1,
+  "wins": 2,
   "losses": 1,
   "today_trades": 2,
   "today_date": "2026-09-17",
@@ -35,7 +23,7 @@
   "last_signal_time": "2026-09-17 05:50 UTC",
   "last_signal_dir": "LONG",
   "confluence_history": [],
-  "flip_count": 4,
+  "flip_count": 0,
   "peak_equity": 1000,
   "current_equity": 1000
 }
