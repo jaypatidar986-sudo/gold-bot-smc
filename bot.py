@@ -1,476 +1,426 @@
-    m15, m5 = data["m15"], data["m5"]
-    cur = m5["close"].iloc[-1]
-    live = fetch_live_price()
-    if live:
-        cur = live
+# ============================================================
+#   USDJPY BOT V5 — FINAL
+#   1H Signals | 1M Reversal | 15min Updates
+#   73-78% WR Strategy
+# ============================================================
 
-    dxy_c, us10y_c = get_macro_changes()
-    print("DXY: " + str(round(dxy_c, 3)) + "% | US10Y: " + str(round(us10y_c, 3)) + "%")
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import requests
+import time
+import json
+import os
+from datetime import datetime, timedelta, timezone
+import warnings
+warnings.filterwarnings('ignore')
 
-    state, msg = check_position(state, cur, now_str)
-    if msg: send_telegram(msg)
-    state, msg = check_counter(state, cur)
-    if msg: send_telegram(msg)
+# ============================================================
+# CONFIG (GitHub Secrets se)
+# ============================================================
+BOT_TOKEN = os.getenv('TG_TOKEN', "8941406579:AAFy7sk6aW6ltjPF7WwFf7k2cSHAcVhD3OA")
+CHAT_ID = os.getenv('TG_CHAT', "5885172416")
+STATE_FILE = "bot_state.json"
 
-    if state.get("position"):
-        m1 = fetch("1min", 50)
-        if m1 is not None:
-            big_1m = check_1m_hold_cancel(m1, state, cur)
-            if big_1m:
-                pos = state["position"]
-                stx = "BUY" if pos["side"] == "LONG" else "SELL"
-                m = "🚨 1M BIG CANDLE - HOLD CANCEL\n\n"
-                m += "Range: " + str(big_1m["range"]) + " (" + str(big_1m["ratio"]) + "x)\n"
-                m += "Body: " + str(big_1m["body_pct"]) + "%\n"
-                m += "Dir: " + big_1m["direction"] + " against " + stx + "\n"
-                m += "Loss: " + str(big_1m["loss"]) + " pips\n\n"
-                m += "CLOSE " + stx + " NOW"
-                send_telegram(m)
+MAX_DAILY = 3
+COOLDOWN_ANY_H = 3
+COOLDOWN_SAME_DIR_H = 12
+SIGNAL_CHECK_SEC = 60
+PRICE_UPDATE_MIN = 15
+DATA_1H_CACHE_SEC = 300
+DATA_1M_CACHE_SEC = 60
+MAX_CANDLE_AGE_MIN = 90
+MAX_ACTIVE_AGE_H = 24
+PIP = 0.01
+PIP_VALUE = 6.7
+ACCOUNT = 1000
+RISK_PCT = 1.0
 
-    if state.get("position"):
-        m5mv = check_5m_10pip_move(m5, state, cur, h1, m15, dxy_c, us10y_c)
-        if m5mv and m5mv["decision"] != "HOLD":
-            emo = {"WATCH": "⚠️", "CLOSE": "🚨", "CLOSE_REVERSE": "🚨🚨"}[m5mv["decision"]]
-            pos = state["position"]
-            stx = "BUY" if pos["side"] == "LONG" else "SELL"
-            m = emo + " 5M " + str(m5mv["move"]) + " PIPS AGAINST " + stx + "\n\n"
-            m += "Score: " + str(m5mv["score"]) + "/15\n"
-            m += "Decision: " + m5mv["decision"].replace("_", " ") + "\n\n"
-            for r in m5mv["reasons"]:
-                m += "• " + r + "\n"
-            if m5mv["decision"] == "CLOSE_REVERSE":
-                rvs = "BUY" if pos["side"] == "SHORT" else "SELL"
-                m += "\n1. CLOSE " + stx + "\n2. Take " + rvs + " @ " + str(round(cur, 2))
-            send_telegram(m)
+# GitHub Actions me single run hota hai, isliye time limit
+MAX_RUN_MINUTES = 5
 
-    broken, reason, action = check_long_hold_break(state, h1, m15, m5, cur, dxy_c, us10y_c)
-    if broken:
-        pos = state.get("position")
-        if pos:
-            stx = "BUY" if pos["side"] == "LONG" else "SELL"
-            if action == "EXIT_AND_REVERSE":
-                rtx = "SELL" if pos["side"] == "LONG" else "BUY"
-                m = "🚨 " + stx + " TUT GAYA - REVERSE!\n\n" + reason
-                m += "\nEntry: " + str(round(pos["entry"], 2)) + "\nCurrent: " + str(round(cur, 2))
-                m += "\n\n1. CLOSE " + stx + "\n2. Take " + rtx + " @ " + str(round(cur, 2))
-                send_telegram(m)
-            elif action == "EXIT_NOW":
-                send_telegram("⚠️ " + stx + " WEAK - EXIT\n\n" + reason)
-            elif action == "WARNING":
-                send_telegram("⚠️ " + stx + " WARNING\n\n" + reason)
+UTC = timezone.utc
+IST = timezone(timedelta(hours=5, minutes=30))
 
-    fi = check_flip_cycle(state, cur, h1, m15, m5, dxy_c, us10y_c)
-    if fi:
-        os_ = fi["close_side"]
-        ns_ = fi["reverse"]
-        state = execute_flip(state, fi, cur, now_str)
-        save_state(state)
-        otx = "BUY" if os_ == "LONG" else "SELL"
-        ntx = "BUY" if ns_ == "LONG" else "SELL"
-        m = "🔄 FLIP CYCLE #" + str(state.get("flip_count", 1))
-        m += "\n\nReason: " + fi["reason"]
-        m += "\n\n❌ CLOSE " + otx + " @ " + str(round(cur, 2))
-        m += "\n✅ OPEN " + ntx + " @ " + str(round(cur, 2))
-        send_telegram(m)
-        return
+# ============================================================
+# STATE
+# ============================================================
+def load_state():
+    d = {
+        'last_buy_time': None,
+        'last_sell_time': None,
+        'daily_count': {},
+        'startup_date': None,
+        'active_signal': None,
+        'processed_candles': []
+    }
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE) as f:
+                x = json.load(f)
+            if isinstance(x, dict):
+                for k in d:
+                    if k in x: d[k] = x[k]
+            if not isinstance(d['daily_count'], dict): d['daily_count'] = {}
+            if not isinstance(d['processed_candles'], list): d['processed_candles'] = []
+        except Exception as e:
+            print(f"State load err: {e}")
+    return d
 
-    old_s = state.get("last_session", "")
-    sc = is_session_transition(old_s, session)
-    if sc or not state.get("session_open"):
-        state["session_open"] = cur
-        state["session_open_time"] = now_str
-        state["session_high"] = cur
-        state["session_low"] = cur
-    if sc:
-        state["flip_count"] = 0
-    sh_prev = state.get("session_high")
-    sl_prev = state.get("session_low")
-    new_high = False
-    new_low = False
-    if sh_prev is None or cur > sh_prev:
-        state["session_high"] = cur
-        new_high = True
-    if sl_prev is None or cur < sl_prev:
-        state["session_low"] = cur
-        new_low = True
-    state["last_session"] = session
-    save_state(state)
-    if sc:
-        send_telegram("🔔 SESSION CHANGE: " + old_s + " -> " + session)
-    if new_high and not sc:
-        send_telegram("📈 " + session + " NEW HIGH: " + str(round(cur, 2)))
-    if new_low and not sc:
-        send_telegram("📉 " + session + " NEW LOW: " + str(round(cur, 2)))
-
-    bull, bear = [], []
-    d_hi, d_lo = daily["high"].max(), daily["low"].min()
-    d_rng = d_hi - d_lo
-    d_mid = (d_hi + d_lo) / 2
-    lv25 = d_lo + d_rng * 0.25
-    lv618 = d_lo + d_rng * 0.618
-    lv786 = d_lo + d_rng * 0.786
-    lv75 = d_lo + d_rng * 0.75
-    if cur > d_mid: bull.append("Above Daily 50%")
-    else: bear.append("Below Daily 50%")
-    if cur < lv25: bull.append("Deep Discount")
-    if cur > lv75: bear.append("Deep Premium")
-    if lv618 <= cur <= lv786: bear.append("At Fib 0.618-0.786")
-
-    d_open = daily["open"].iloc[-1]
-    w_open = daily["open"].iloc[-5] if len(daily) >= 5 else None
-    if cur > d_open: bull.append("Above Daily Open")
-    else: bear.append("Below Daily Open")
-    if w_open:
-        if cur > w_open: bull.append("Above Weekly Open")
-        else: bear.append("Below Weekly Open")
-
-    adr = (daily.tail(30)["high"] - daily.tail(30)["low"]).mean()
-    atr_h1 = atr(h1)
-    if h4.iloc[-1]["close"] > h4["high"].iloc[-12:-1].max(): bull.append("4H BOS UP")
-    if h4.iloc[-1]["close"] < h4["low"].iloc[-12:-1].min(): bear.append("4H BOS DN")
-    if h1.iloc[-1]["close"] > h1["high"].iloc[-15:-1].max(): bull.append("1H MSS UP")
-    if h1.iloc[-1]["close"] < h1["low"].iloc[-15:-1].min(): bear.append("1H MSS DN")
-    if m15.iloc[-1]["close"] > m15["high"].iloc[-10:-1].max(): bull.append("15M MSS UP")
-    if m15.iloc[-1]["close"] < m15["low"].iloc[-10:-1].min(): bear.append("15M MSS DN")
-    c1 = check_choch(h1)
-    if c1 == "BULL": bull.append("1H CHoCH Bull")
-    if c1 == "BEAR": bear.append("1H CHoCH Bear")
-    c4 = check_choch(h4)
-    if c4 == "BULL": bull.append("4H CHoCH Bull")
-    if c4 == "BEAR": bear.append("4H CHoCH Bear")
-    d = check_displacement(h1, atr_h1)
-    if d == "BULL": bull.append("Bull Displacement")
-    if d == "BEAR": bear.append("Bear Displacement")
-    cm5, cm5b = m5.iloc[-1], m5.iloc[-2]
-    bm5 = abs(cm5["close"] - cm5["open"])
-    if cm5["close"] > cm5["open"] and bm5 > adr * 0.05: bull.append("5M Bull Candle")
-    if cm5["close"] < cm5["open"] and bm5 > adr * 0.05: bear.append("5M Bear Candle")
-    if cm5b["close"] < cm5b["open"] and cm5["close"] > cm5["open"] and cm5["close"] > cm5b["open"]: bull.append("5M Bull Engulf")
-    if cm5b["close"] > cm5b["open"] and cm5["close"] < cm5["open"] and cm5["close"] < cm5b["open"]: bear.append("5M Bear Engulf")
-    fvgs = find_fvg(m15)[-15:]
-    if any(f["t"] == "B" and abs(cur - f["ce"]) < adr * 0.3 for f in fvgs): bull.append("Bull FVG")
-    if any(f["t"] == "S" and abs(cur - f["ce"]) < adr * 0.3 for f in fvgs): bear.append("Bear FVG")
-    bo, so = find_ob(h1)
-    if bo and bo["bot"] - 5 <= cur <= bo["top"] + 5: bull.append("At Bull OB")
-    if so and so["bot"] - 5 <= cur <= so["top"] + 5: bear.append("At Bear OB")
-    H1, L1 = swings(h1)
-    bs_ = sorted(H1, reverse=True)[:5]
-    ss_ = sorted(L1)[:5]
-    nB = next((p for p in bs_ if p > cur), None)
-    nS = next((p for p in ss_ if p < cur), None)
-    if nB and nB - cur < adr * 0.3: bear.append("Near BSL")
-    if nS and cur - nS < adr * 0.3: bull.append("Near SSL")
-    if check_equal_levels(L1): bull.append("Equal Lows")
-    if check_equal_levels(H1): bear.append("Equal Highs")
-    if len(H1) > 1 and cur > H1[-2] and cur < H1[-1]: bear.append("Above Inducement")
-    if len(L1) > 1 and cur < L1[-2] and cur > L1[-1]: bull.append("Below Inducement")
-    cl = h1["close"].tolist()
-    e50, e200 = ema(cl, 50), ema(cl, 200)
-    if cur > e50 and e50 > e200: bull.append("EMA50>200 UP")
-    if cur < e50 and e50 < e200: bear.append("EMA50<200 DN")
-    if cur > e200: bull.append("Above EMA200")
-    else: bear.append("Below EMA200")
-    rv = rsi(cl)
-    if rv < 30: bull.append("RSI Oversold")
-    if rv > 70: bear.append("RSI Overbought")
-    if 50 < rv < 70: bull.append("RSI Bullish")
-    if 30 < rv < 50: bear.append("RSI Bearish")
-    mn = ema(cl[-50:], 12) - ema(cl[-50:], 26)
-    mp = ema(cl[-51:-1], 12) - ema(cl[-51:-1], 26)
-    if mn > 0 and mp <= 0: bull.append("MACD Cross UP")
-    if mn < 0 and mp >= 0: bear.append("MACD Cross DN")
-    if mn > 0: bull.append("MACD Positive")
-    else: bear.append("MACD Negative")
-    ma20 = sma(cl, 20)
-    sd20 = (sum([(x - ma20) ** 2 for x in cl[-20:]]) / 20) ** 0.5
-    if cur <= ma20 - 2 * sd20: bull.append("Below BB Lower")
-    if cur >= ma20 + 2 * sd20: bear.append("Above BB Upper")
-    vn = vd = 0
-    for i in range(max(0, len(h1) - 50), len(h1)):
-        tp = (h1["high"].iloc[i] + h1["low"].iloc[i] + h1["close"].iloc[i]) / 3
-        vn += tp
-        vd += 1
-    vwap = vn / vd if vd else cur
-    if cur > vwap: bull.append("Above VWAP")
-    else: bear.append("Below VWAP")
-    pd_ = daily.iloc[-2]
-    P = (pd_["high"] + pd_["low"] + pd_["close"]) / 3
-    if cur > P: bull.append("Above Pivot")
-    else: bear.append("Below Pivot")
-    pdh, pdl = daily["high"].iloc[-2], daily["low"].iloc[-2]
-    if abs(cur - pdh) < adr * 0.25: bear.append("Near PDH")
-    if abs(cur - pdl) < adr * 0.25: bull.append("Near PDL")
-    wh = daily["high"].tail(7).max()
-    wl = daily["low"].tail(7).min()
-    if abs(cur - wh) < adr * 0.3: bear.append("Near Weekly High")
-    if abs(cur - wl) < adr * 0.3: bull.append("Near Weekly Low")
-    rn = round(cur / 50) * 50
-    if abs(cur - rn) < adr * 0.15:
-        if cur > rn: bear.append("Above Round")
-        else: bull.append("Below Round")
-    dow = now_utc.weekday()
-    if dow == 0 and len(daily) > 1:
-        gap = abs(daily["open"].iloc[-1] - daily["close"].iloc[-2])
-        if gap > adr * 0.3:
-            if daily["open"].iloc[-1] > daily["close"].iloc[-2]: bull.append("Monday Gap UP")
-            else: bear.append("Monday Gap DOWN")
-    td = m5["dt"].iloc[-1].date()
-    for lb, h1_, h2_ in [("Asian", 0, 7), ("London", 7, 12), ("NY", 12, 21)]:
-        sg = m5[(m5["dt"].dt.date == td) & (m5["dt"].dt.hour >= h1_) & (m5["dt"].dt.hour < h2_)]
-        if len(sg):
-            if cur > sg["high"].max(): bull.append("Above " + lb + " High")
-            if cur < sg["low"].min(): bear.append("Below " + lb + " Low")
-    c3, c2 = h1.iloc[-1], h1.iloc[-2]
-    bd = abs(c3["close"] - c3["open"])
-    uw = c3["high"] - max(c3["close"], c3["open"])
-    dw = min(c3["close"], c3["open"]) - c3["low"]
-    if dw > 2 * bd and uw < bd: bull.append("1H Bull Pin")
-    if uw > 2 * bd and dw < bd: bear.append("1H Bear Pin")
-    if c2["close"] < c2["open"] and c3["close"] > c3["open"] and c3["close"] > c2["open"]: bull.append("1H Bull Engulf")
-    if c2["close"] > c2["open"] and c3["close"] < c3["open"] and c3["close"] < c2["open"]: bear.append("1H Bear Engulf")
-
-    md, ms = check_momentum(m5)
-    if md == "FAST_BULL": bull.append("Fast Bull")
-    if md == "FAST_BEAR": bear.append("Fast Bear")
-    if md == "MED_BULL": bull.append("Med Bull")
-    if md == "MED_BEAR": bear.append("Med Bear")
-    pa = check_price_action(m5)
-    for s in pa:
-        if "Bull" in s: bull.append(s)
-        elif "Bear" in s: bear.append(s)
-
-    av = check_adx(h1)
-    if av > 25:
-        if c1 == "BULL": bull.append("ADX Strong UP")
-        if c1 == "BEAR": bear.append("ADX Strong DN")
-    if bollinger_squeeze(m15):
-        bull.append("BB Squeeze")
-        bear.append("BB Squeeze")
-    kc = check_keltner(h1)
-    if kc:
-        if "Above" in kc: bull.append(kc)
-        else: bear.append(kc)
-    sr = check_stoch_rsi(m15)
-    if sr > 80: bear.append("StochRSI OB")
-    if sr < 20: bull.append("StochRSI OS")
-    ich = check_ichimoku(h1)
-    if ich:
-        if "Bull" in ich: bull.append(ich)
-        else: bear.append(ich)
-    dc = check_donchian(m15)
-    if dc:
-        if "Upper" in dc: bull.append(dc)
-        else: bear.append(dc)
-
-    fib_r = fib_retracement(daily)
-    if fib_r:
-        for k, v in fib_r.items():
-            if k not in ["high", "low"] and abs(cur - v) < 3:
-                bull.append("At Fib " + k)
-                bear.append("At Fib " + k)
-    fib_e = fib_extension(daily)
-    if fib_e:
-        for k, v in fib_e.items():
-            if abs(cur - v) < 3:
-                bull.append("Near Ext " + k)
-    cam = camarilla_pivots(daily)
-    if cam:
-        if cur > cam["H3"]: bull.append("Above Cam H3")
-        if cur < cam["L3"]: bear.append("Below Cam L3")
-    wd = woodie_pivots(daily)
-    if wd:
-        if cur > wd["P"]: bull.append("Above Woodie P")
-        else: bear.append("Below Woodie P")
-    vp = volume_profile(m5)
-    if vp:
-        if abs(cur - vp["POC"]) < 3: bull.append("At POC")
-        if cur > vp["VAH"]: bull.append("Above VAH")
-        if cur < vp["VAL"]: bear.append("Below VAL")
-    kz = is_killzone()
-    if kz: bull.append(kz + " High Prob")
-    if is_silver_bullet():
-        bull.append("Silver Bullet")
-        bear.append("Silver Bullet")
-    ote_lo, ote_hi = ote_zone(daily)
-    if ote_lo and ote_hi and ote_lo <= cur <= ote_hi:
-        bull.append("At OTE Buy")
-        bear.append("At OTE Sell")
-    hs = detect_hs_pattern(h1)
-    if hs:
-        if "Bear" in hs: bear.append(hs)
-        else: bull.append(hs)
-    dt = detect_double_top_bottom(h1)
-    if dt:
-        if "Bear" in dt: bear.append(dt)
-        else: bull.append(dt)
-    pwh, pwl = prev_week_hl(daily)
-    if pwh and abs(cur - pwh) < 5: bear.append("Near Prev Week High")
-    if pwl and abs(cur - pwl) < 5: bull.append("Near Prev Week Low")
-    pmh, pml = prev_month_hl(daily)
-    if pmh and abs(cur - pmh) < 8: bear.append("Near Prev Month High")
-    if pml and abs(cur - pml) < 8: bull.append("Near Prev Month Low")
-    dp = day_of_week_pattern()
-    if dp: bull.append(dp)
+def save_state(s):
     try:
-        silver = fetch_symbol("XAG/USD")
-        if silver is not None and len(silver) >= 2:
-            sil_ch = ((silver["close"].iloc[-1] - silver["close"].iloc[-2]) / silver["close"].iloc[-2]) * 100
-            if sil_ch > 0.3: bull.append("Silver Strong")
-            if sil_ch < -0.3: bear.append("Silver Weak")
-    except Exception:
-        pass
+        with open(STATE_FILE, 'w') as f:
+            json.dump(s, f, default=str)
+    except Exception as e:
+        print(f"Save err: {e}")
 
-    liq = session_liquidity_map(h1, m15, cur)
-    et, es, ei = detect_session_exhaustion(m5, m15, h1, session, cur)
-    if et and es >= 4:
-        la = state.get("exhaust_alerted", "")
-        ak = session + "_" + et
-        if la != ak:
-            state["exhaust_alerted"] = ak
-            save_state(state)
-            a = "📊 SESSION LEVELS\n\nSession: " + session
-            a += "\nRange: " + str(ei["range_used"]) + "%"
-            a += "\nHigh: " + str(ei["sess_high"]) + " Mid: " + str(ei["mid"]) + " Low: " + str(ei["sess_low"])
-            if et == "BEAR_EXHAUST":
-                a += "\n\n🟢 Above " + str(ei["mid"]) + " = BUY"
-                a += "\n🔴 Below " + str(ei["sess_low"]) + " = SELL"
+# ============================================================
+# TELEGRAM
+# ============================================================
+def send_tg(msg, retries=3):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    for i in range(retries):
+        try:
+            r = requests.post(url, data=data, timeout=15)
+            if r.status_code == 200: return True
+            if r.status_code == 429:
+                w = int(r.headers.get('Retry-After', 30))
+                time.sleep(w)
             else:
-                a += "\n\n🟢 Above " + str(ei["sess_high"]) + " = BUY"
-                a += "\n🔴 Below " + str(ei["mid"]) + " = SELL"
-            send_telegram(a)
+                print(f"TG {r.status_code}: {r.text[:80]}")
+        except Exception as e:
+            print(f"Try {i+1}: {e}")
+            time.sleep(5)
+    return False
 
-    existing = state.get("position")
-    counter = state.get("counter")
-    if existing and not counter and sc:
-        cs, csc = detect_counter_signal(existing["side"], h1, m15, m5, cur, session)
-        if cs:
-            if cs == "LONG":
-                csl, ctp = cur - 10, cur + 15
-            else:
-                csl, ctp = cur + 10, cur - 15
-            state["counter"] = {"side": cs, "entry": cur, "sl": csl, "tp": ctp, "opened_at": now_str}
-            p = state["position"]
-            if p["side"] == "SHORT":
-                p["tp1"] += 10; p["tp2"] += 10; p["tp3"] += 10
-            else:
-                p["tp1"] -= 10; p["tp2"] -= 10; p["tp3"] -= 10
-            state["position"] = p
-            save_state(state)
-            m = "⚡ HEDGE " + ("BUY" if cs == "LONG" else "SELL")
-            m += "\nScore: " + str(csc) + "/8\nEntry: " + str(round(cur, 2))
-            send_telegram(m)
-            return
+# ============================================================
+# DATA
+# ============================================================
+def get_1h():
+    try:
+        end = datetime.now(UTC)
+        df = yf.download('JPY=X', start=end-timedelta(days=59), end=end,
+                         interval='1h', progress=False, auto_adjust=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[['Open','High','Low','Close','Volume']].dropna()
+        return df if len(df) > 210 else None
+    except Exception as e:
+        print(f"1H err: {e}")
+        return None
 
-    if is_session_grace_period(state, session):
-        print("Grace period")
-        return
+def get_1m():
+    try:
+        end = datetime.now(UTC)
+        df = yf.download('JPY=X', start=end-timedelta(days=2), end=end,
+                         interval='1m', progress=False, auto_adjust=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[['Open','High','Low','Close','Volume']].dropna()
+        return df if len(df) >= 20 else None
+    except Exception as e:
+        print(f"1M err: {e}")
+        return None
 
-    bS, sS = len(bull), len(bear)
-    conf = max(bS, sS)
-    if conf < 10:
-        if bS == sS:
-            k = now_utc.strftime("%Y-%m-%d") + "_" + session
-            if state.get("neutral_alerted", "") != k:
-                state["neutral_alerted"] = k
-                save_state(state)
-                t = "⚪ NEUTRAL\n\nBull: " + str(bS) + " | Bear: " + str(sS)
-                t += "\n" + str(round(cur, 2)) + " current"
-                if liq["nearest_bsl"]:
-                    t += "\n↑ " + str(round(liq["nearest_bsl"], 2)) + " = BUY"
-                if liq["nearest_ssl"]:
-                    t += "\n↓ " + str(round(liq["nearest_ssl"], 2)) + " = SELL"
-                send_telegram(t)
-        return
+# ============================================================
+# INDICATORS
+# ============================================================
+def add_ind(df):
+    df = df.copy()
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-    action = "LONG" if bS > sS else "SHORT"
-    if not check_htf_alignment(h1, m15, m5, action):
-        print("HTF not aligned")
-        return
+    delta = df['Close'].diff()
+    gain = (delta.where(delta>0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta<0, 0)).rolling(14).mean()
+    df['RSI'] = 100 - (100/(1 + gain/loss))
 
-    last_price = state.get("last_signal_price", 0)
-    if last_price:
-        drift = abs(cur - last_price)
-        if drift > 15:
-            print("Late signal drift " + str(round(drift, 1)) + " - skip")
-            return
+    df['Date'] = df.index.date
+    daily = df.groupby('Date').agg(PDH=('High','max'), PDL=('Low','min')).shift(1)
+    daily.index.name = 'Date'
+    df = df.merge(daily, left_on='Date', right_index=True, how='left')
 
-    if existing:
-        if existing["side"] == action:
-            lh = state.get("last_hold_msg", "")
-            sh = True
-            if lh:
-                try:
-                    lhd = datetime.strptime(lh, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
-                    if (now_utc - lhd).total_seconds() / 60 < 60:
-                        sh = False
-                except Exception:
-                    pass
-            if sh:
-                state["last_hold_msg"] = now_str
-                save_state(state)
-                ht = "⏸️ HOLD - " + ("BUY" if existing["side"] == "LONG" else "SELL")
-                ht += "\nEntry: " + str(round(existing["entry"], 2)) + " Current: " + str(round(cur, 2))
-                ht += "\nSL: " + str(round(existing["sl"], 2))
-                send_telegram(ht)
-            return
-        else:
-            if abs(bS - sS) >= 3:
-                state["position"] = None
-                send_telegram("🔄 FLIP - " + existing["side"] + " closed, " + action + " opening")
-            else:
-                return
+    asian = df[df.index.hour < 7].groupby('Date').agg(AH=('High','max'), AL=('Low','min'))
+    asian.index.name = 'Date'
+    df = df.merge(asian, left_on='Date', right_index=True, how='left')
 
-    entry = cur
-    av = atr(h1)
-    if av == 0:
-        av = 15
-    sld = max(av, 15)
-    if action == "LONG":
-        sl = cur - sld
-        tp1 = cur + sld
-        tp2 = cur + sld * 1.5
-        tp3 = cur + sld * 2
+    df['PDH'] = df['PDH'].fillna(df['High'])
+    df['PDL'] = df['PDL'].fillna(df['Low'])
+    df['AH'] = df['AH'].fillna(df['High'])
+    df['AL'] = df['AL'].fillna(df['Low'])
+
+    return df.dropna(subset=['EMA_200', 'RSI'])
+
+# ============================================================
+# SIGNAL SCAN
+# ============================================================
+def scan_signals(df, state):
+    signals = []
+    now = datetime.now(UTC)
+
+    for idx in range(max(5, len(df)-6), len(df)-1):
+        c = df.iloc[idx]
+        t = df.index[idx]
+
+        try:
+            t_aware = t.replace(tzinfo=UTC) if t.tzinfo is None else t.astimezone(UTC)
+        except: continue
+
+        age_min = (now - t_aware).total_seconds() / 60
+        if age_min > MAX_CANDLE_AGE_MIN: continue
+
+        cid = t.isoformat()
+        if cid in state.get('processed_candles', []): continue
+
+        h = t.hour
+        in_morning = 6 <= h <= 10
+        in_evening = 13 <= h <= 17
+        if not (in_morning or in_evening): continue
+
+        ist_t = t_aware.astimezone(IST)
+        day = str(ist_t.date())
+        if state['daily_count'].get(day, 0) >= MAX_DAILY: continue
+
+        ah, al, pdh, pdl = c['AH'], c['AL'], c['PDH'], c['PDL']
+        up = c['Close'] > c['EMA_200'] and c['EMA_50'] > c['EMA_200']
+        dn = c['Close'] < c['EMA_200'] and c['EMA_50'] < c['EMA_200']
+
+        sw_b = (c['Low'] < al and c['Close'] > al) or (c['Low'] < pdl and c['Close'] > pdl)
+        sw_s = (c['High'] > ah and c['Close'] < ah) or (c['High'] > pdh and c['Close'] < pdh)
+        pb_b = up and c['Low'] <= c['EMA_50'] and c['Close'] > c['EMA_50']
+        pb_s = dn and c['High'] >= c['EMA_50'] and c['Close'] < c['EMA_50']
+
+        e = float(c['Close'])
+        sig = None
+
+        if up and (sw_b or pb_b) and 40 < c['RSI'] < 75:
+            sig = {'dir':'BUY','entry':e,'sl':e-0.15,'tp':e+0.20,
+                   'time':t_aware,'session':'Morning' if in_morning else 'Evening'}
+        elif dn and (sw_s or pb_s) and 25 < c['RSI'] < 60:
+            sig = {'dir':'SELL','entry':e,'sl':e+0.15,'tp':e-0.20,
+                   'time':t_aware,'session':'Morning' if in_morning else 'Evening'}
+
+        if sig:
+            sig['id'] = f"{sig['dir']}_{cid}"
+            sig['candle_id'] = cid
+            signals.append(sig)
+
+    return signals
+
+# ============================================================
+# REVERSAL CHECK
+# ============================================================
+def check_reversal(df1m, state):
+    active = state.get('active_signal')
+    if not active: return None
+
+    try:
+        at = datetime.fromisoformat(active['time']) if isinstance(active['time'], str) else active['time']
+        if at.tzinfo is None: at = at.replace(tzinfo=UTC)
+        age_h = (datetime.now(UTC) - at.astimezone(UTC)).total_seconds() / 3600
+        if age_h > MAX_ACTIVE_AGE_H:
+            return {'type':'EXPIRED','price':float(df1m.iloc[-1]['Close']),'pips':0}
+    except Exception as e:
+        print(f"Age err: {e}")
+
+    if len(df1m) < 3: return None
+    c = df1m.iloc[-2]
+
+    price = float(c['Close'])
+    high = float(c['High'])
+    low = float(c['Low'])
+
+    d = active['dir']
+    sl = float(active['sl'])
+    tp = float(active['tp'])
+
+    if d == 'BUY':
+        if low <= sl: return {'type':'SL_HIT','price':price,'pips':-15}
+        if high >= tp: return {'type':'TP_HIT','price':price,'pips':+20}
     else:
-        sl = cur + sld
-        tp1 = cur - sld
-        tp2 = cur - sld * 1.5
-        tp3 = cur - sld * 2
+        if high >= sl: return {'type':'SL_HIT','price':price,'pips':-15}
+        if low <= tp: return {'type':'TP_HIT','price':price,'pips':+20}
+    return None
 
-    state["position"] = {"side": action, "entry": entry, "sl": round(sl, 2),
-                          "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
-                          "tp_hits": [], "warn_hits": [], "opened_at": now_str}
-    state["last_signal_price"] = cur
-    state["last_signal_time"] = now_str
-    state["last_signal_dir"] = action
-    state["today_trades"] = state.get("today_trades", 0) + 1
-    state["last_hold_msg"] = now_str
+# ============================================================
+# HELPERS
+# ============================================================
+def calc_lot(sl_pips=15):
+    risk_usd = ACCOUNT * RISK_PCT / 100
+    lot = round(risk_usd / (sl_pips * PIP_VALUE), 2)
+    return max(lot, 0.01)
+
+def is_weekend():
+    return datetime.now(UTC).weekday() >= 5
+
+def clean_old_state(state):
+    cutoff = str((datetime.now(IST) - timedelta(days=14)).date())
+    state['daily_count'] = {k:v for k,v in state['daily_count'].items() if k >= cutoff}
+    state['processed_candles'] = state.get('processed_candles', [])[-50:]
+
+# ============================================================
+# MESSAGES
+# ============================================================
+def msg_signal(s):
+    emoji = "🟢" if s['dir'] == 'BUY' else "🔴"
+    lot = calc_lot(15)
+    ist = s['time'].astimezone(IST)
+    return f"""{emoji} <b>USDJPY {s['dir']} SIGNAL</b>
+━━━━━━━━━━━━━━━━━━
+📍 Entry:   {s['entry']:.3f}
+🛑 SL:      {s['sl']:.3f} (15 pip)
+🎯 TP:      {s['tp']:.3f} (20 pip)
+💰 Lot:     {lot} (1% risk)
+⏰ Time:    {ist.strftime('%H:%M IST')}
+📊 Session: {s['session']}
+━━━━━━━━━━━━━━━━━━
+💡 <b>Entry NOW at market</b>
+📌 100% book at TP
+"""
+
+def msg_price(df1m, state):
+    c = df1m.iloc[-1]
+    price = float(c['Close'])
+    ist = datetime.now(IST).strftime('%H:%M IST')
+    a = state.get('active_signal')
+
+    base = f"""📊 <b>USDJPY UPDATE</b>
+⏰ {ist}
+💵 Price: <b>{price:.3f}</b>
+"""
+    if a:
+        try:
+            e = float(a['entry']); sl = float(a['sl']); tp = float(a['tp'])
+            d = a['dir']
+            pips = (price - e)/PIP if d == 'BUY' else (e - price)/PIP
+            emoji = "🟢" if d == 'BUY' else "🔴"
+            base += f"""
+{emoji} Active: {d}
+📍 Entry: {e:.3f}
+🎯 TP: {tp:.3f} | 🛑 SL: {sl:.3f}
+📊 <b>Now: {pips:+.1f} pip</b>
+"""
+        except: pass
+    else:
+        base += "\n💤 No active trade"
+    return base
+
+def msg_rev(r, a):
+    if r['type'] == 'SL_HIT':
+        return f"""🚨 <b>SL HIT</b>
+━━━━━━━━━━━━━━━━━━
+📌 Signal: {a['dir']}
+🛑 Price: {r['price']:.3f}
+📉 Loss: {r['pips']} pip
+━━━━━━━━━━━━━━━━━━
+💡 Wait for next signal
+"""
+    elif r['type'] == 'TP_HIT':
+        return f"""🎯 <b>TP HIT</b>
+━━━━━━━━━━━━━━━━━━
+📌 Signal: {a['dir']}
+🎯 Price: {r['price']:.3f}
+📈 Profit: +{r['pips']} pip
+━━━━━━━━━━━━━━━━━━
+💡 Wait for next signal
+"""
+    else:
+        return f"""⏰ <b>SIGNAL EXPIRED</b>
+📌 {a['dir']} — 24h crossed
+💡 New signal dekho
+"""
+
+# ============================================================
+# MAIN (Single run — GitHub Actions ke liye)
+# ============================================================
+print("=" * 60)
+print("   USDJPY BOT V5 — RUN")
+print("=" * 60)
+
+state = load_state()
+clean_old_state(state)
+
+now_utc = datetime.now(UTC)
+
+# Weekend skip
+if is_weekend():
+    print("Weekend — no trade")
+    save_state(state)
+    exit(0)
+
+# Startup msg (once per day)
+today = str(now_utc.astimezone(IST).date())
+if state.get('startup_date') != today:
+    send_tg(f"🤖 <b>USDJPY Bot V5</b>\n\n{now_utc.astimezone(IST).strftime('%d-%b %H:%M IST')}")
+    state['startup_date'] = today
     save_state(state)
 
-    mode, bp, sp = get_market_mode(bull, bear, h1, m15, m5)
-    if action == "LONG":
-        text = "🟢 BUY GOLD"
-    else:
-        text = "🔴 SELL GOLD"
-    text += "\n\nEntry: " + str(round(entry, 2))
-    text += "\nStop Loss: " + str(round(sl, 2))
-    text += "\n\nTarget 1: " + str(round(tp1, 2))
-    text += "\nTarget 2: " + str(round(tp2, 2))
-    text += "\nTarget 3: " + str(round(tp3, 2))
-    text += "\n\nDate: " + format_ist_date(now_utc)
-    text += "\nTime: " + format_ist_time(now_utc)
-    text += "\nSession: " + session
-    text += "\nMode: " + mode + " (B:" + str(bp) + "% S:" + str(sp) + "%)"
-    if liq["nearest_bsl"]:
-        text += "\n\nLiquidity Above: " + str(round(liq["nearest_bsl"], 2))
-    if liq["nearest_ssl"]:
-        text += "\nLiquidity Below: " + str(round(liq["nearest_ssl"], 2))
-    if pre:
-        text += "\n\n⚠️ NEWS: " + pre + "\nClose trades"
-    if news_days:
-        text += "\n\n📅 " + ", ".join(news_days)
-    send_telegram(text)
-    print("Sent: " + action + " Conf " + str(conf))
+# Fetch data
+df1h = get_1h()
+if df1h is not None:
+    df1h = add_ind(df1h)
+    print(f"1H: {len(df1h)} candles")
 
+df1m = get_1m()
+if df1m is not None:
+    print(f"1M: {len(df1m)} candles")
 
-if __name__ == "__main__":
-    run()
+# Reversal check
+if df1m is not None and state.get('active_signal'):
+    r = check_reversal(df1m, state)
+    if r:
+        send_tg(msg_rev(r, state['active_signal']))
+        print(f"{r['type']} @ {r['price']:.3f}")
+        state['active_signal'] = None
+        save_state(state)
+
+# Signal check
+if df1h is not None and not state.get('active_signal'):
+    # Cooldown
+    last_t = None
+    for key in ['last_buy_time','last_sell_time']:
+        v = state.get(key)
+        if v:
+            try:
+                t = datetime.fromisoformat(v)
+                if t.tzinfo is None: t = t.replace(tzinfo=UTC)
+                if last_t is None or t > last_t: last_t = t
+            except: pass
+
+    cooldown_ok = True
+    if last_t:
+        age_h = (now_utc - last_t.astimezone(UTC)).total_seconds()/3600
+        if age_h < COOLDOWN_ANY_H: cooldown_ok = False
+
+    if cooldown_ok:
+        sigs = scan_signals(df1h, state)
+        if sigs:
+            s = sigs[-1]
+            if send_tg(msg_signal(s)):
+                print(f"✅ {s['dir']} @ {s['entry']:.3f}")
+                state['active_signal'] = s
+                pc = state.get('processed_candles', [])
+                for x in sigs: pc.append(x['candle_id'])
+                state['processed_candles'] = pc[-50:]
+
+                if s['dir'] == 'BUY':
+                    state['last_buy_time'] = s['time'].isoformat()
+                else:
+                    state['last_sell_time'] = s['time'].isoformat()
+
+                day = str(s['time'].astimezone(IST).date())
+                dc = state.get('daily_count', {})
+                dc[day] = dc.get(day, 0) + 1
+                state['daily_count'] = dc
+                save_state(state)
+        else:
+            print("No signal")
+
+# Price update (only if active)
+if df1m is not None and state.get('active_signal'):
+    send_tg(msg_price(df1m, state))
+    print("Price update sent")
+
+save_state(state)
+print("✅ Run complete")
