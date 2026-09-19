@@ -8,16 +8,21 @@ on:
 jobs:
   signal:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Install deps
         run: pip install yfinance pandas numpy requests tzdata
+
       - name: Run bot
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
+          JSONBIN_ID: ${{ secrets.JSONBIN_ID }}
         run: python bot.py
