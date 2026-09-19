@@ -2,22 +2,20 @@ name: Gold SMC Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # Har 10 min
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
   signal:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
       - name: Install dependencies
-        run: pip install yfinance pandas numpy requests
-      
+        run: pip install yfinance pandas numpy requests tzdata
       - name: Run bot
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
