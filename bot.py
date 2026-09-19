@@ -1,9 +1,10 @@
 # ============================================================
-#   USDJPY BOT V9 — FINAL PRODUCTION
-#   All Fixes + 3 Minor Fixed:
-#   - Retest actual monitoring
-#   - Concurrent lock tightened
-#   - DXY last-closed candle
+#   USDJPY BOT V10 — FINAL (1 MIN CHECK)
+#   - 1 min effective check (internal loop)
+#   - 4H trend | DXY | Retest | Reversal 6+ | Hold 5/5
+#   - TP1/TP2 20/40 | SL to BE | Time exit 8h
+#   - Risk: Daily 3% / Weekly 6% / Monthly 10%
+#   - JSONBin state | Concurrent lock | Error alerts
 # ============================================================
 
 import yfinance as yf
@@ -29,6 +30,7 @@ JSONBIN_KEY = os.getenv('JSONBIN_KEY')
 JSONBIN_ID = os.getenv('JSONBIN_ID')
 STATE_FILE = "bot_state.json"
 
+# Trading rules
 MAX_DAILY = 3
 COOLDOWN_ANY_H = 3
 COOLDOWN_SAME_DIR_H = 12
@@ -41,16 +43,25 @@ TP2_PIPS = 40
 PIP = 0.01
 PIP_VALUE = 6.7
 ACCOUNT = 1000
+
+# Risk
 RISK_A_PLUS = 1.0
 RISK_A = 1.0
 RISK_B = 0.5
 DAILY_LOSS_PCT = 3.0
 WEEKLY_LOSS_PCT = 6.0
 MONTHLY_LOSS_PCT = 10.0
+
+# Retest
 RETEST_OFFSET_PIP = 5
 RETEST_WAIT_MIN = 5
-RUN_LOCK_MAX_SEC = 240  # FIX 2: 4 min (was 5)
 
+# Loop (V10)
+LOOP_DURATION_SEC = 280     # 4 min 40 sec
+CHECK_INTERVAL_SEC = 60     # 1 min
+RUN_LOCK_MAX_SEC = 300      # 5 min
+
+# Timezones
 UTC = timezone.utc
 IST = ZoneInfo("Asia/Kolkata")
 LONDON = ZoneInfo("Europe/London")
@@ -61,7 +72,7 @@ NY = ZoneInfo("America/New_York")
 # ============================================================
 def default_state():
     return {
-        'version': '9.0',
+        'version': '10.0',
         'startup_date': None,
         'last_buy_time': None,
         'last_sell_time': None,
@@ -90,10 +101,10 @@ def load_state():
                 if isinstance(data, dict):
                     for k in d:
                         if k in data: d[k] = data[k]
-                print("✅ State loaded")
+                print("State loaded from JSONBin")
                 return d
         except Exception as e:
-            print(f"State load err: {e}")
+            print(f"JSONBin load err: {e}")
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
@@ -115,7 +126,7 @@ def save_state(s):
                         headers={"X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json"},
                         timeout=10)
         except Exception as e:
-            print(f"State save err: {e}")
+            print(f"JSONBin save err: {e}")
 
 # ============================================================
 # TELEGRAM
@@ -125,7 +136,7 @@ def esc(t):
 
 def send_tg(msg, retries=3):
     if not BOT_TOKEN or not CHAT_ID:
-        print("❌ Secrets missing")
+        print("Secrets missing")
         return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
@@ -143,7 +154,7 @@ def send_tg(msg, retries=3):
     return False
 
 # ============================================================
-# TIME
+# TIME HELPERS (DST Auto)
 # ============================================================
 def get_session_name(now_utc):
     london = now_utc.astimezone(LONDON)
@@ -240,13 +251,9 @@ def add_ind(df):
     df['AL'] = df['AL'].fillna(df['Low'])
     return df.dropna(subset=['EMA_200','RSI'])
 
-# ============================================================
-# FIX 3: DXY bias using LAST CLOSED candle
-# ============================================================
 def get_dxy_bias(dxy_df):
     try:
         if dxy_df is None or len(dxy_df) < 6: return None
-        # Use last CLOSED candle (not forming)
         last = dxy_df['Close'].iloc[-2]
         prev = dxy_df['Close'].iloc[-6]
         diff = (last - prev) / prev * 100
@@ -259,7 +266,7 @@ def get_4h_bias(df4h):
     if df4h is None or len(df4h) < 210: return None
     d = add_ind(df4h)
     if len(d) < 3: return None
-    c = d.iloc[-2]  # Last CLOSED
+    c = d.iloc[-2]
     if c['Close'] > c['EMA_200'] and c['EMA_50'] > c['EMA_200']: return 'UP'
     if c['Close'] < c['EMA_200'] and c['EMA_50'] < c['EMA_200']: return 'DOWN'
     return 'MIXED'
@@ -388,7 +395,6 @@ def scan_signals(df, state, now_utc, dxy_bias, h4_bias):
         if sig:
             g, sc = grade(c, up, dn, sw_b, sw_s, pb_b, pb_s, dxy_bias, h4_bias, sig['dir'])
             rt = should_retest(c)
-            # FIX 1: Retest level
             if rt:
                 if sig['dir'] == 'BUY':
                     retest_lvl = sig['entry'] + RETEST_OFFSET_PIP * PIP
@@ -397,8 +403,7 @@ def scan_signals(df, state, now_utc, dxy_bias, h4_bias):
             else:
                 retest_lvl = None
             sig.update({'grade':g,'score':sc,'risk_pct':risk_for_grade(g),
-                        'should_retest':rt,
-                        'retest_level':retest_lvl,
+                        'should_retest':rt,'retest_level':retest_lvl,
                         'tp1_hit':False,'tp2_hit':False,
                         'sl_original':sig['sl'],
                         'id':f"{sig['dir']}_{cid}",'candle_id':cid,
@@ -467,7 +472,7 @@ def check_reversal(df1m, state):
     return None
 
 # ============================================================
-# FIX 1: PENDING RETEST MONITORING
+# PENDING ORDER (RETEST)
 # ============================================================
 def check_pending_order(df1m, state, now_utc):
     po = state.get('pending_order')
@@ -515,14 +520,15 @@ def update_pnl(state, now, pips):
 # MESSAGES
 # ============================================================
 def msg_signal(s):
-    em = "🟢" if s['dir'] == 'BUY' else "🔴"
+    em = "BUY" if s['dir'] == 'BUY' else "SELL"
+    emoji = "🟢" if s['dir'] == 'BUY' else "🔴"
     lot = calc_lot(s['risk_pct'])
     ist = s['time'].astimezone(IST)
     if s.get('should_retest') and s.get('retest_level'):
         rt = f"Retest limit @ {s['retest_level']:.3f}"
     else:
         rt = "Market now"
-    return f"""{em} <b>USDJPY {s['dir']}</b>
+    return f"""{emoji} <b>USDJPY {em}</b>
 ━━━━━━━━━━━━━━━━━━
 📊 Grade: <b>{s['grade']}</b> ({s['score']}/15)
 📍 Entry: {s['entry']:.3f}
@@ -560,40 +566,166 @@ def msg_rev(r, a):
     return f"⏰ {t}"
 
 def msg_retest_filled(po, fill):
-    em = "🟢" if po['dir'] == 'BUY' else "🔴"
-    return f"""{em} <b>RETEST FILLED</b>
+    emoji = "🟢" if po['dir'] == 'BUY' else "🔴"
+    sd = po['signal_data']
+    return f"""{emoji} <b>RETEST FILLED</b>
 📌 {po['dir']} @ {fill:.3f}
-💡 Now active
 
-📍 Entry: {po['signal_data']['entry']:.3f}
-🛑 SL: {po['signal_data']['sl']:.3f}
-🎯 TP1: {po['signal_data']['tp1']:.3f}
-🎯 TP2: {po['signal_data']['tp2']:.3f}
+📍 Entry: {sd['entry']:.3f}
+🛑 SL: {sd['sl']:.3f}
+🎯 TP1: {sd['tp1']:.3f}
+🎯 TP2: {sd['tp2']:.3f}
 """
 
 def msg_retest_expired(po):
     return f"""⏰ <b>RETEST EXPIRED</b>
 📌 {po['dir']} @ {po['level']:.3f}
 💡 5 min me nahi aaya
-📊 Market order allowed
 """
 
 # ============================================================
-# MAIN
+# SINGLE CHECK CYCLE
+# ============================================================
+def run_once(state):
+    now_utc = datetime.now(UTC)
+    print(f"Check @ {now_utc.astimezone(IST).strftime('%H:%M:%S IST')}")
+
+    df1h = get_1h()
+    df4h = get_4h()
+    df1m = get_1m()
+    dxy_df = get_dxy()
+
+    if df1h is not None:
+        df1h = add_ind(df1h)
+
+    dxy_bias = get_dxy_bias(dxy_df)
+    h4_bias = get_4h_bias(df4h)
+    print(f"  1H:{len(df1h) if df1h is not None else 0} 4H:{len(df4h) if df4h is not None else 0} 1M:{len(df1m) if df1m is not None else 0} | DXY:{dxy_bias} 4H:{h4_bias}")
+
+    # Pending retest
+    if df1m is not None and state.get('pending_order'):
+        res = check_pending_order(df1m, state, now_utc)
+        if res:
+            if res['action'] == 'FILLED':
+                po = res['order']
+                state['active_signal'] = po['signal_data']
+                state['active_signal']['created'] = now_utc.isoformat()
+                send_tg(msg_retest_filled(po, res['fill']))
+                print(f"  Retest FILLED @ {res['fill']:.3f}")
+                state['pending_order'] = None
+            elif res['action'] == 'EXPIRED':
+                send_tg(msg_retest_expired(res['order']))
+                print("  Retest expired")
+                state['pending_order'] = None
+            save_state(state)
+
+    # Reversal
+    if df1m is not None and state.get('active_signal'):
+        r = check_reversal(df1m, state)
+        if r:
+            a = state['active_signal']
+            send_tg(msg_rev(r, a))
+            print(f"  {r['type']}")
+            if r['type'] == 'TP1_HIT':
+                a['tp1_hit'] = True
+                a['sl'] = a['entry']
+                state['active_signal'] = a
+            else:
+                update_pnl(state, now_utc, r.get('pips', 0))
+                state['active_signal'] = None
+                state['stats']['total'] = state['stats'].get('total', 0) + 1
+                if r.get('pips', 0) > 0: state['stats']['wins'] += 1
+                elif r.get('pips', 0) < 0: state['stats']['losses'] += 1
+                state['stats']['pips'] = state['stats'].get('pips', 0) + r.get('pips', 0)
+            save_state(state)
+
+    # New signal
+    if df1h is not None and not state.get('active_signal') and not state.get('pending_order'):
+        if check_limits(state, now_utc):
+            last_any = None
+            for k in ['last_buy_time','last_sell_time']:
+                v = state.get(k)
+                if v:
+                    try:
+                        t = datetime.fromisoformat(v)
+                        if t.tzinfo is None: t = t.replace(tzinfo=UTC)
+                        if last_any is None or t > last_any: last_any = t
+                    except: pass
+            cooldown_ok = True
+            if last_any:
+                if (now_utc - last_any.astimezone(UTC)).total_seconds()/3600 < COOLDOWN_ANY_H:
+                    cooldown_ok = False
+            if cooldown_ok:
+                sigs = scan_signals(df1h, state, now_utc, dxy_bias, h4_bias)
+                valid = []
+                for s in sigs:
+                    last_dir = state.get('last_buy_time') if s['dir']=='BUY' else state.get('last_sell_time')
+                    if last_dir:
+                        try:
+                            t = datetime.fromisoformat(last_dir)
+                            if t.tzinfo is None: t = t.replace(tzinfo=UTC)
+                            if (now_utc - t.astimezone(UTC)).total_seconds()/3600 < COOLDOWN_SAME_DIR_H:
+                                continue
+                        except: pass
+                    valid.append(s)
+                if valid:
+                    s = valid[-1]
+                    if send_tg(msg_signal(s)):
+                        print(f"  Signal: {s['dir']} {s['grade']} @ {s['entry']:.3f}")
+                        if s.get('should_retest') and s.get('retest_level'):
+                            s['signal_data'] = dict(s)
+                            expiry = now_utc + timedelta(minutes=RETEST_WAIT_MIN)
+                            state['pending_order'] = {
+                                'dir': s['dir'],
+                                'level': s['retest_level'],
+                                'created': now_utc.isoformat(),
+                                'expiry': expiry.isoformat(),
+                                'signal_data': s
+                            }
+                            print(f"  Pending retest @ {s['retest_level']:.3f}")
+                        else:
+                            state['active_signal'] = s
+                        pc = state.get('processed_candles', [])
+                        for x in valid: pc.append(x['candle_id'])
+                        state['processed_candles'] = pc[-50:]
+                        if s['dir'] == 'BUY': state['last_buy_time'] = s['time'].isoformat()
+                        else: state['last_sell_time'] = s['time'].isoformat()
+                        d = ist_date(s['time'])
+                        state['daily_count'][d] = state['daily_count'].get(d, 0) + 1
+                        save_state(state)
+
+    # Price update (30 min)
+    if df1m is not None and state.get('active_signal'):
+        last_pu = state.get('last_price_update')
+        do = True
+        if last_pu:
+            try:
+                t = datetime.fromisoformat(last_pu)
+                if t.tzinfo is None: t = t.replace(tzinfo=UTC)
+                if (now_utc - t.astimezone(UTC)).total_seconds()/60 < 30: do = False
+            except: pass
+        if do:
+            send_tg(msg_price(df1m, state))
+            print("  Price update sent")
+            state['last_price_update'] = now_utc.isoformat()
+            save_state(state)
+
+# ============================================================
+# MAIN (V10 — 1 MIN CHECK VIA LOOP)
 # ============================================================
 def main():
     print("=" * 60)
-    print("   USDJPY BOT V9")
+    print("   USDJPY BOT V10 — 1 MIN CHECK")
     print("=" * 60)
 
     if not BOT_TOKEN or not CHAT_ID:
-        print("❌ Secrets missing")
+        print("Secrets missing - exit")
         return
 
     state = load_state()
     now_utc = datetime.now(UTC)
 
-    # FIX 2: Concurrent lock (240 sec max)
+    # Concurrent lock
     RUN_ID = str(uuid.uuid4())[:8]
     if state.get('running_run') and state.get('running_start'):
         try:
@@ -601,10 +733,8 @@ def main():
             if st.tzinfo is None: st = st.replace(tzinfo=UTC)
             age = (now_utc - st.astimezone(UTC)).total_seconds()
             if age < RUN_LOCK_MAX_SEC and state['running_run'] != RUN_ID:
-                print(f"⚠️ Another run active ({int(age)}s). Exit.")
+                print(f"Another run active ({int(age)}s). Exit.")
                 return
-            # If stale, force clear
-            print(f"⚠️ Stale lock ({int(age)}s). Force clearing.")
         except: pass
 
     state['running_run'] = RUN_ID
@@ -613,146 +743,41 @@ def main():
 
     try:
         if is_weekend():
-            print("Weekend — exit")
+            print("Weekend - exit")
             return
 
         # Startup once per day
         today = ist_date(now_utc)
         if state.get('startup_date') != today:
-            send_tg(f"🤖 <b>USDJPY Bot V9</b>\n{now_utc.astimezone(IST).strftime('%d-%b %H:%M IST')}")
+            send_tg(f"🤖 <b>USDJPY Bot V10</b>\n{now_utc.astimezone(IST).strftime('%d-%b %H:%M IST')}")
             state['startup_date'] = today
             save_state(state)
 
-        # Data
-        df1h = get_1h()
-        df4h = get_4h()
-        df1m = get_1m()
-        dxy_df = get_dxy()
+        # Loop: 5 checks, 1 min each
+        loop_start = time.time()
+        check_num = 0
+        while (time.time() - loop_start) < LOOP_DURATION_SEC:
+            check_num += 1
+            print(f"\n--- Check #{check_num} ---")
+            try:
+                run_once(state)
+            except Exception as e:
+                print(f"Check err: {e}")
+                import traceback
+                traceback.print_exc()
 
-        if df1h is not None: df1h = add_ind(df1h)
+            remaining = LOOP_DURATION_SEC - (time.time() - loop_start)
+            if remaining > CHECK_INTERVAL_SEC:
+                time.sleep(CHECK_INTERVAL_SEC)
+            else:
+                break
 
-        dxy_bias = get_dxy_bias(dxy_df)
-        h4_bias = get_4h_bias(df4h)
-
-        print(f"1H:{len(df1h) if df1h is not None else 0} 4H:{len(df4h) if df4h is not None else 0} 1M:{len(df1m) if df1m is not None else 0}")
-        print(f"DXY:{dxy_bias} 4H:{h4_bias}")
-
-        # FIX 1: Check pending retest order
-        if df1m is not None and state.get('pending_order'):
-            res = check_pending_order(df1m, state, now_utc)
-            if res:
-                if res['action'] == 'FILLED':
-                    po = res['order']
-                    # Activate signal
-                    state['active_signal'] = po['signal_data']
-                    state['active_signal']['created'] = now_utc.isoformat()
-                    send_tg(msg_retest_filled(po, res['fill']))
-                    print(f"✅ Retest FILLED @ {res['fill']:.3f}")
-                    state['pending_order'] = None
-                    save_state(state)
-                elif res['action'] == 'EXPIRED':
-                    send_tg(msg_retest_expired(res['order']))
-                    print("⏰ Retest expired")
-                    state['pending_order'] = None
-                    save_state(state)
-
-        # REVERSAL CHECK
-        if df1m is not None and state.get('active_signal'):
-            r = check_reversal(df1m, state)
-            if r:
-                a = state['active_signal']
-                send_tg(msg_rev(r, a))
-                print(f"{r['type']}")
-                if r['type'] == 'TP1_HIT':
-                    a['tp1_hit'] = True
-                    a['sl'] = a['entry']
-                    state['active_signal'] = a
-                else:
-                    update_pnl(state, now_utc, r.get('pips', 0))
-                    state['active_signal'] = None
-                    state['stats']['total'] = state['stats'].get('total', 0) + 1
-                    if r.get('pips', 0) > 0: state['stats']['wins'] += 1
-                    elif r.get('pips', 0) < 0: state['stats']['losses'] += 1
-                    state['stats']['pips'] = state['stats'].get('pips', 0) + r.get('pips', 0)
-                save_state(state)
-
-        # NEW SIGNAL
-        if df1h is not None and not state.get('active_signal') and not state.get('pending_order'):
-            if check_limits(state, now_utc):
-                last_any = None
-                for k in ['last_buy_time','last_sell_time']:
-                    v = state.get(k)
-                    if v:
-                        try:
-                            t = datetime.fromisoformat(v)
-                            if t.tzinfo is None: t = t.replace(tzinfo=UTC)
-                            if last_any is None or t > last_any: last_any = t
-                        except: pass
-                cooldown_ok = True
-                if last_any:
-                    if (now_utc - last_any.astimezone(UTC)).total_seconds()/3600 < COOLDOWN_ANY_H:
-                        cooldown_ok = False
-                if cooldown_ok:
-                    sigs = scan_signals(df1h, state, now_utc, dxy_bias, h4_bias)
-                    valid = []
-                    for s in sigs:
-                        last_dir = state.get('last_buy_time') if s['dir']=='BUY' else state.get('last_sell_time')
-                        if last_dir:
-                            try:
-                                t = datetime.fromisoformat(last_dir)
-                                if t.tzinfo is None: t = t.replace(tzinfo=UTC)
-                                if (now_utc - t.astimezone(UTC)).total_seconds()/3600 < COOLDOWN_SAME_DIR_H:
-                                    continue
-                            except: pass
-                        valid.append(s)
-                    if valid:
-                        s = valid[-1]
-                        if send_tg(msg_signal(s)):
-                            print(f"✅ {s['dir']} {s['grade']} @ {s['entry']:.3f}")
-
-                            # FIX 1: If retest, create pending order
-                            if s.get('should_retest') and s.get('retest_level'):
-                                s['signal_data'] = dict(s)  # Store full signal
-                                expiry = now_utc + timedelta(minutes=RETEST_WAIT_MIN)
-                                state['pending_order'] = {
-                                    'dir': s['dir'],
-                                    'level': s['retest_level'],
-                                    'created': now_utc.isoformat(),
-                                    'expiry': expiry.isoformat(),
-                                    'signal_data': s
-                                }
-                                print(f"⏳ Pending retest @ {s['retest_level']:.3f}")
-                            else:
-                                state['active_signal'] = s
-
-                            pc = state.get('processed_candles', [])
-                            for x in valid: pc.append(x['candle_id'])
-                            state['processed_candles'] = pc[-50:]
-                            if s['dir'] == 'BUY': state['last_buy_time'] = s['time'].isoformat()
-                            else: state['last_sell_time'] = s['time'].isoformat()
-                            d = ist_date(s['time'])
-                            state['daily_count'][d] = state['daily_count'].get(d, 0) + 1
-                            save_state(state)
-
-        # PRICE UPDATE (30 min)
-        if df1m is not None and state.get('active_signal'):
-            last_pu = state.get('last_price_update')
-            do = True
-            if last_pu:
-                try:
-                    t = datetime.fromisoformat(last_pu)
-                    if t.tzinfo is None: t = t.replace(tzinfo=UTC)
-                    if (now_utc - t.astimezone(UTC)).total_seconds()/60 < 30: do = False
-                except: pass
-            if do:
-                send_tg(msg_price(df1m, state))
-                print("💰 Price update")
-                state['last_price_update'] = now_utc.isoformat()
+        print(f"\nDone. {check_num} checks complete.")
 
     finally:
         state['running_run'] = None
         save_state(state)
-        print("✅ Done")
+        print("Run complete")
 
 if __name__ == "__main__":
     try:
@@ -761,5 +786,5 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         try:
-            send_tg(f"❌ Bot error: {esc(str(e)[:200])}")
+            send_tg(f"Bot error: {esc(str(e)[:200])}")
         except: pass
